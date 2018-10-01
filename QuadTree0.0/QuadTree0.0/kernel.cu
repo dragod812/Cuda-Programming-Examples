@@ -2,9 +2,14 @@
 #include "device_launch_parameters.h"
 #include <thrust/random.h>
 #include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 #include <helper_cuda.h>
-
+#include <list> 
+#include <sstream>
+#include <fstream>
+#include <string> 
 #include <stdio.h>
+#include <iostream> 
 
 cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
 
@@ -75,7 +80,8 @@ class Quadtree_Node{
 	Bounding_Box bb;
 	//sIdx of points in the bb for the global data array
 	int sIdx, eIdx;	
-	__host__ __device__ Quadtree_Node() : idx(-1), sIdx(-1), eIdx(-1){}
+	Quadtree_Node *NE, *NW, *SW, *SE; 
+	__host__ __device__ Quadtree_Node() : idx(-1), sIdx(-1), eIdx(-1), NE(NULL), NW(NULL),SW(NULL),SE(NULL){}
 	__host__ __device__ bool isNull(){
 		return (idx == -1);
 	}
@@ -85,7 +91,7 @@ class Quadtree_Node{
 	__host__ __device__ int getIdx(){
 		return idx;
 	}
-	__host__ __device__ void setBoundingBox(int x, int y, int X, int Y){
+	__host__ __device__ void setBoundingBox(float x,float y,float X,float Y){
 		bb.set(x, y, X, Y);	
 	}
 	__host__ __device__ __forceinline__ Bounding_Box& getBoundingBox(){
@@ -95,19 +101,31 @@ class Quadtree_Node{
 		sIdx = s;
 		eIdx = e;
 	}
+	__host__ __device__ __forceinline__ Quadtree_Node* getSW(){
+		return SW;
+	}
+	__host__ __device__ __forceinline__ Quadtree_Node* getSE(){
+		return SE;
+	}
+	__host__ __device__ __forceinline__ Quadtree_Node* getNW(){
+		return NW; 
+	}
+	__host__ __device__ __forceinline__ Quadtree_Node* getNE(){
+		return NE; 
+	}
+	__host__ __device__ __forceinline__ void setSW( Quadtree_Node* ptr){
+		SW = ptr;
+	}
+	__host__ __device__ __forceinline__ void setNW( Quadtree_Node* ptr){
+		NW = ptr;
+	}
+	__host__ __device__ __forceinline__ void setSE( Quadtree_Node* ptr){
+		SE = ptr;
+	}
+	__host__ __device__ __forceinline__ void setNE( Quadtree_Node* ptr){
+		NE = ptr;
+	}
 	/*
-	__host__ __device__ __forceinline__ int getSWChildIdx(){
-		return 2*idx + 1;
-	}
-	__host__ __device__ __forceinline__ int getSEChildIdx(){
-		return 2*idx + 2;
-	}
-	__host__ __device__ __forceinline__ int getNWChildIdx(){
-		return 2*idx + 3;
-	}
-	__host__ __device__ __forceinline__ int getNEChildIdx(){
-		return 2*idx + 4;
-	}
 	__host__ __device__ __forceinline__ int getStartIdx(){
 		return sIdx;
 	}
@@ -142,10 +160,9 @@ struct Random_generator
   }
 };
 
-
 int main()
 {
-
+	int num_points = -1;
 	//Set Cuda Device
   	int device_count = 0, device = -1, warp_size = 0;
   	checkCudaErrors( cudaGetDeviceCount( &device_count ) );
@@ -168,9 +185,56 @@ int main()
 		exit(EXIT_SUCCESS);
 	}
 	cudaSetDevice(device);
-	getchar();
+	//Read Points from file and put it into x0(X points) and y0(Y Points)
+	std::list<float> stlX, stlY;
+	std::ifstream source("2.5width_4patels.txt");
+	if(source.is_open()){
+		int i = 0;
+		for(std::string line;std::getline(source, line); i+=1)   //read stream line by line
+		{
+			std::istringstream in(line);      
+			float x, y;
+			in >> x >> y;       
+			stlX.push_back(x);
+			stlY.push_back(y);
+		}
+	}
+	else{
+		printf("No");
+		exit(1);
+	}
+				
+	num_points = stlX.size();	
+	thrust::device_vector<float> x0( stlX.begin(), stlX.end() ); 
+	thrust::device_vector<float> y0( stlY.begin(), stlY.end() );
+	thrust::device_vector<float> x1( num_points );
+	thrust::device_vector<float> y1( num_points );
 
+	std::cout << num_points << std::endl;	
+	
+	//copy pointers to the points into the device because kernels don't support device_vector as input they accept raw_pointers
+	//Thrust data types are not understood by a CUDA kernel and need to be converted back to its underlying pointer. 
+	Points h_points[2];
+	h_points[0].set( thrust::raw_pointer_cast( &x0[0] ), thrust::raw_pointer_cast( &y0[0] ) );
+	h_points[1].set( thrust::raw_pointer_cast( &x1[0] ), thrust::raw_pointer_cast( &y1[0] ) );
+
+	Points *d_points;
+	checkCudaErrors( cudaMalloc( (void**) &d_points, 2*sizeof(Points) ) ); 
+	checkCudaErrors( cudaMemcpy( d_points, h_points, 2*sizeof(Points), cudaMemcpyHostToDevice ) );
+	//Setting Cuda Heap size for dynamic memory allocation	
+	size_t size = 1024*1024*1024;
+	cudaDeviceSetLimit(cudaLimitMallocHeapSize, size);
+	cudaDeviceGetLimit(&size, cudaLimitMallocHeapSize);
+
+	//Copy root node from host to device
+	Quadtree_Node h_root;
+	h_root.setRange(0, num_points);
+	Quadtree_Node* d_root;
+	checkCudaErrors( cudaMalloc( (void**) &d_root, sizeof(Quadtree_Node)));
+	checkCudaErrors( cudaMemcpy( d_root, &h_root, sizeof(Quadtree_Node), cudaMemcpyHostToDevice));
+
+
+	getchar();
     return 0;
 }
-
 

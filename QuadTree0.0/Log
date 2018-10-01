@@ -1,2 +1,6 @@
 Date: 19/09/2018
 I have started reading the paper again. I am trying to remember the algorithm again before start writing it again. The Code that i have written till now is based on the old paper. I have to make some small changes and start working on it. I will also have to learn about parallel reduction techniques using Cuda. This i will learn by studying the other code, once i am done with my paper.
+Date: 25/09/2018
+I was not able to complete the task that i assigned myself last time. So i am continueing it.
+So i will first understand the program at hand and see if i can work through it. After that i will try to 
+implement a CPU-GPU hybrid approach. First Priority is writing code to be able to show something as a final result. And later we can move forward.
