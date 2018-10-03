@@ -162,7 +162,11 @@ struct Random_generator
 
 int main()
 {
+	//parameters
+	const int max_depth = 8;
+	const int min_points_per_node = 20;
 	int num_points = -1;
+
 	//Set Cuda Device
   	int device_count = 0, device = -1, warp_size = 0;
   	checkCudaErrors( cudaGetDeviceCount( &device_count ) );
@@ -233,6 +237,9 @@ int main()
 	checkCudaErrors( cudaMalloc( (void**) &d_root, sizeof(Quadtree_Node)));
 	checkCudaErrors( cudaMemcpy( d_root, &h_root, sizeof(Quadtree_Node), cudaMemcpyHostToDevice));
 
+	//set the recursion limit based on max_depth
+	//maximum possible depth is 24 levels
+  	cudaDeviceSetLimit( cudaLimitDevRuntimeSyncDepth, max_depth );
 
 	getchar();
     return 0;
