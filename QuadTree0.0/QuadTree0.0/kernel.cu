@@ -78,10 +78,13 @@ class Quadtree_Node{
 	//node index;
 	int idx;
 	Bounding_Box bb;
-	//sIdx of points in the bb for the global data array
-	int sIdx, eIdx;	
+	//startIdx of points in the bb for the global data array
+	int startIdx, endIdx;	
 	Quadtree_Node *NE, *NW, *SW, *SE; 
-	__host__ __device__ Quadtree_Node() : idx(-1), sIdx(-1), eIdx(-1), NE(NULL), NW(NULL),SW(NULL),SE(NULL){}
+public:
+	__host__ __device__ Quadtree_Node() : idx(-1), startIdx(-1), endIdx(-1), NE(NULL), NW(NULL), SW(NULL), SE(NULL){
+
+	}
 	__host__ __device__ bool isNull(){
 		return (idx == -1);
 	}
@@ -98,8 +101,8 @@ class Quadtree_Node{
 		return bb;
 	}
 	__host__ __device__ void setRange(int s, int e){
-		sIdx = s;
-		eIdx = e;
+		startIdx = s;
+		endIdx = e;
 	}
 	__host__ __device__ __forceinline__ Quadtree_Node* getSW(){
 		return SW;
@@ -125,16 +128,16 @@ class Quadtree_Node{
 	__host__ __device__ __forceinline__ void setNE( Quadtree_Node* ptr){
 		NE = ptr;
 	}
-	/*
+/*  
 	__host__ __device__ __forceinline__ int getStartIdx(){
-		return sIdx;
+		return startIdx;
 	}
 	__host__ __device__ __forceinline__ int getEndIdx(){
-		return eIdx;
+		return endIdx;
 	}
-	*/
-	__host__ __device__ __forceinline__ int numberOfPoints(){
-		return eIdx - sIdx + 1;
+ */	
+ 	__host__ __device__ __forceinline__ int numberOfPoints(){
+		return endIdx - startIdx + 1;
 	}
 };
 
@@ -153,13 +156,46 @@ struct Random_generator
 
   __host__ __device__ __forceinline__ thrust::tuple<float, float> operator()() 
   {
-    unsigned seed = hash( blockIdx.x*blockDim.x + threadIdx.x );
+    unsigned seed = hash( blockidx.x*blockdim.x + threadidx.x );
     thrust::default_random_engine rng(seed);
     thrust::random::uniform_real_distribution<float> distrib;
     return thrust::make_tuple( distrib(rng), distrib(rng) );
   }
 };
 
+class Parameters
+{
+	const int min_points_per_node;
+	__host__ __device__ Parameters( int mppn ) : min_points_per_node(mppn) {}
+}
+
+template< int NUM_THREADS_PER_BLOCK >
+__global__ buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
+
+	const int NUM_WARPS_PER_BLOCK = NUM_THREADS_PER_BLOCK / warpSize;
+
+	//shared memory
+	extern __shared__ int smem[];
+	
+	
+	// Addresses of shared Memory
+	volatile int *s_num_pts[4];
+	for( int i = 0 ; i < 4 ; ++i )
+		s_num_pts[i] = (volatile int *) &smem[i*NUM_WARPS_PER_BLOCK];
+
+	int lane_mask_lt = (1 << lane_id) - 1; 
+	
+	int num_points = root->numberOfPoints();
+
+	//stop recursion if num_points <= minimum number of points required for recursion 
+	if( num_points <= prmtrs.min_points_per_node){
+
+		//unable to understand the use of point_selector
+		return;
+	}
+
+
+}
 int main()
 {
 	//parameters
@@ -178,7 +214,9 @@ int main()
 		{
 		  device = i;
 		  warp_size = properties.warpSize;
-		  std::cout << "Running on GPU " << i << " (" << properties.name << ")" << std::endl;
+		  std::cout << "Running on GPU: " << i << " (" << properties.name << ")" << std::endl;
+		  std::cout << "Warp Size: " << warp_size << std::endl;
+		  std::cout << "Threads Per Block: " << properties.maxThreadsPerBlock<< std::endl;
 		  break;
 		}
 		std::cout << "GPU " << i << " (" << properties.name << ") does not support CUDA Dynamic Parallelism" << std::endl;
@@ -207,7 +245,7 @@ int main()
 		printf("No");
 		exit(1);
 	}
-				
+
 	num_points = stlX.size();	
 	thrust::device_vector<float> x0( stlX.begin(), stlX.end() ); 
 	thrust::device_vector<float> y0( stlY.begin(), stlY.end() );
@@ -218,10 +256,12 @@ int main()
 	
 	//copy pointers to the points into the device because kernels don't support device_vector as input they accept raw_pointers
 	//Thrust data types are not understood by a CUDA kernel and need to be converted back to its underlying pointer. 
+	//host_points
 	Points h_points[2];
 	h_points[0].set( thrust::raw_pointer_cast( &x0[0] ), thrust::raw_pointer_cast( &y0[0] ) );
 	h_points[1].set( thrust::raw_pointer_cast( &x1[0] ), thrust::raw_pointer_cast( &y1[0] ) );
 
+	//device_points
 	Points *d_points;
 	checkCudaErrors( cudaMalloc( (void**) &d_points, 2*sizeof(Points) ) ); 
 	checkCudaErrors( cudaMemcpy( d_points, h_points, 2*sizeof(Points), cudaMemcpyHostToDevice ) );
