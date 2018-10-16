@@ -46,10 +46,14 @@ class Bounding_Box{
     float xMin , xMax, yMin, yMax;
 public:
 	__host__ __device__ Bounding_Box(){
-		xMin = 0;
-		yMin = 0;
-		xMax = 1920;
-		yMax = 1080;
+		xMin = -700;
+		yMin = -700;
+		xMax = 700;
+		yMax = 700;
+	}
+	__host__ __device__ void computeCenter( float2 &center ){
+		center.x = 0.5f * ( m_p_min.x + m_p_max.x );
+		center.y = 0.5f * ( m_p_min.y + m_p_max.y );
 	}
 	__host__ __device__ __forceinline__ float getxMax() const {
 		return xMax;		
@@ -128,14 +132,13 @@ public:
 	__host__ __device__ __forceinline__ void setNE( Quadtree_Node* ptr){
 		NE = ptr;
 	}
-/*  
+
 	__host__ __device__ __forceinline__ int getStartIdx(){
 		return startIdx;
 	}
 	__host__ __device__ __forceinline__ int getEndIdx(){
 		return endIdx;
 	}
- */	
  	__host__ __device__ __forceinline__ int numberOfPoints(){
 		return endIdx - startIdx + 1;
 	}
@@ -170,13 +173,16 @@ class Parameters
 }
 
 template< int NUM_THREADS_PER_BLOCK >
-__global__ buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
-
+__global__ 
+void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 	const int NUM_WARPS_PER_BLOCK = NUM_THREADS_PER_BLOCK / warpSize;
 
 	//shared memory
 	extern __shared__ int smem[];
 	
+	//warp_id and lane_id
+	const int warp_id = threadIdx.x / warpSize;
+	const int lane_id = threadIdx.x % warpSize;
 	
 	// Addresses of shared Memory
 	volatile int *s_num_pts[4];
@@ -185,15 +191,26 @@ __global__ buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs
 
 	int lane_mask_lt = (1 << lane_id) - 1; 
 	
-	int num_points = root->numberOfPoints();
+	int NUM_POINTS = root->numberOfPoints();
 
 	//stop recursion if num_points <= minimum number of points required for recursion 
-	if( num_points <= prmtrs.min_points_per_node){
+	if( NUM_POINTS <= prmtrs.min_points_per_node){
 
 		//unable to understand the use of point_selector
 		return;
 	}
 
+	//get Center of the bounding box
+	float2 center;
+	const Bounding_Box &box = root->getBoundingBox();
+	box.computeCenter( center );
+
+	int NUM_POINTS_PER_WARP = max( warpSize, ( NUM_POINTS + NUM_WARPS_PER_BLOCK - 1 ) / NUM_WARPS_PER_BLOCK );
+	
+	int warp_begin = root->getStartIdx() + warp_id*NUM_POINTS_PER_WARP;
+	int warp_end = min(warp_begin + NUM_POINTS_PER_WARP, root->getEndIdx());
+
+	
 
 }
 int main()
