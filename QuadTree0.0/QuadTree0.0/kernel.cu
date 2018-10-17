@@ -210,7 +210,16 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 	int warp_begin = root->getStartIdx() + warp_id*NUM_POINTS_PER_WARP;
 	int warp_end = min(warp_begin + NUM_POINTS_PER_WARP, root->getEndIdx());
 
-	
+	// Count number of points in each child
+
+	if( lane_id == 0 )
+	{
+		s_num_pts[0][warp_id] = 0;
+		s_num_pts[1][warp_id] = 0;
+		s_num_pts[2][warp_id] = 0;
+		s_num_pts[3][warp_id] = 0;
+	}
+
 
 }
 int main()
