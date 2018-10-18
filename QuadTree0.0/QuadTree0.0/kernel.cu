@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <iostream> 
 
+#define FULL_MASK 0xffffffff
+
 cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
 
 class Points
@@ -23,12 +25,12 @@ public:
 
   __host__ __device__ Points( float *x, float *y ) : X(x), Y(y) {}
 
-  __host__ __device__ __forceinline__ float2 get_point( int idx ) const
+  __host__ __device__ __forceinline__ float2 getPoint( int idx ) const
   {
     return make_float2( X[idx], Y[idx] );
   }
 
-  __host__ __device__ __forceinline__ void set_point( int idx, const float2 &p ) 
+  __host__ __device__ __forceinline__ void setPoint( int idx, const float2 &p ) 
   {
     X[idx] = p.x;
     Y[idx] = p.y;
@@ -169,7 +171,15 @@ struct Random_generator
 class Parameters
 {
 	const int min_points_per_node;
-	__host__ __device__ Parameters( int mppn ) : min_points_per_node(mppn) {}
+	//Introduced to minimise shifting of points
+	//can have values only 0 and 1 based on slot
+	//points[points_slot] is input slot
+	//points[(points_slot+1)%2] is output slot
+	int points_slot;
+	__host__ __device__ Parameters( int mppn ) : min_points_per_node(mppn), points_slot(0) {}
+	//copy constructor for the evaluation of children of current node
+	__host__ __device__ Parameters( Parameters prm ) : min_points_per_node(prm.min_points_per_node), points_slot((prm.points_slot+1)%2) {}
+
 }
 
 template< int NUM_THREADS_PER_BLOCK >
@@ -210,7 +220,90 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 	int warp_begin = root->getStartIdx() + warp_id*NUM_POINTS_PER_WARP;
 	int warp_end = min(warp_begin + NUM_POINTS_PER_WARP, root->getEndIdx());
 
+	if( lane_id == 0 )
+	{
+		s_num_pts[0][warp_id] = 0;
+		s_num_pts[1][warp_id] = 0;
+		s_num_pts[2][warp_id] = 0;
+		s_num_pts[3][warp_id] = 0;
+	}
 	
+	//input points
+	const Points &input = points[prmtrs.points_slot];
+	
+	//__any_sync(unsigned mask, predicate):
+		//Evaluate predicate for all non-exited threads in mask and return non-zero if and only if predicate evaluates to non-zero for any of them.
+	//count points in each warp that belong to which child
+	for( int itr = warp_begin + lane_id ; __any_sync(FULL_MASK, itr < warp_end ) ; itr += warpSize){
+		bool is_active = itr < warp_end;
+
+		//get the coordinates of the point
+		float2 curP;
+		if(is_active)
+			curP = input.getPoint(itr);
+		else
+			curP = make_float2(0.0f, 0.0f);
+
+		//consider standard anticlockwise quadrants for numbering 0 to 3
+
+		//__ballot_sync(unsigned mask, predicate):
+			//Evaluate predicate for all non-exited threads in mask and return an integer whose Nth bit is set if and only if predicate evaluates to non-zero for the Nth thread of the warp and the Nth thread is active.
+		//__popc
+			//Count the number of bits that are set to 1 in a 32 bit integer.
+		//top-right Quadrant (Quadrant - I)
+		int cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x >= center.x && curP.y >= center.y));
+		if( cnt > 0 && lane_id == 0 )
+			s_num_pts[0][warp_id] += cnt;
+
+		//top-left Quadrant (Quadrant - II)
+		cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x < center.x && curP.y >= center.y));
+		if( cnt > 0 && lane_id == 0 )
+			s_num_pts[1][warp_id] += cnt;
+
+		//bottom-left Quadrant (Quadrant - III)
+		cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x < center.x && curP.y < center.y));
+		if( cnt > 0 && lane_id == 0 )
+			s_num_pts[2][warp_id] += cnt;
+
+		//bottom-right Quadrant (Quadrant - IV)
+		cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x >= center.x && curP.y < center.y));
+		if( cnt > 0 && lane_id == 0 )
+			s_num_pts[3][warp_id] += cnt;
+	}		
+
+	//sychronize warps
+	//__syncthreads() acts as a barrier at which all threads in the block must wait before any is allowed to proceed
+	__syncthreads();
+
+	// Scan the warps' results to know the "global" numbers.
+	// First 4 warps scan the numbers of points per child (inclusive scan).
+	if( warp_id < 4 )
+	{
+		int num_pts = lane_id < NUM_WARPS_PER_BLOCK ? s_num_pts[warp_id][lane_id] : 0;
+		#pragma unroll
+		for( int offset = 1 ; offset < NUM_WARPS_PER_BLOCK ; offset *= 2 )
+		{
+			int n = __shfl_up_sync( num_pts, offset, NUM_WARPS_PER_BLOCK );
+			if( lane_id >= offset )
+				num_pts += n;
+		}
+		if( lane_id < NUM_WARPS_PER_BLOCK )
+			s_num_pts[warp_id][lane_id] = num_pts;
+	}
+	__syncthreads();
+	// Compute global offsets.
+	if( warp_id == 0 )
+	{
+		int sum = s_num_pts[0][NUM_WARPS_PER_BLOCK-1];
+		for( int row = 1 ; row < 4 ; ++row )
+		{
+			int tmp = s_num_pts[row][NUM_WARPS_PER_BLOCK-1];
+			if( lane_id < NUM_WARPS_PER_BLOCK )
+				s_num_pts[row][lane_id] += sum;
+			sum += tmp;
+		}
+	}
+	__syncthreads();
 
 }
 int main()
