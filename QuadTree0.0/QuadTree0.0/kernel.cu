@@ -199,14 +199,23 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 	for( int i = 0 ; i < 4 ; ++i )
 		s_num_pts[i] = (volatile int *) &smem[i*NUM_WARPS_PER_BLOCK];
 
-	int lane_mask_lt = (1 << lane_id) - 1; 
 	
 	int NUM_POINTS = root->numberOfPoints();
 
 	//stop recursion if num_points <= minimum number of points required for recursion 
 	if( NUM_POINTS <= prmtrs.min_points_per_node){
-
-		//unable to understand the use of point_selector
+		//If in current iteration the points are in slot 1
+		//shift them to slot 0
+		//we want the output in the slot 0
+		if(param.points_slot == 1)
+		{
+			int it = root->getStartIdx(), end = root->getEndIdx();
+			for( it += threadIdx.x; it < end ; it += NUM_THREADS_PER_BLOCK){
+				if(it < end )
+					points[0].setPoint(it, points[1].getPoint(it));
+			}
+		}
+		
 		return;
 	}
 
@@ -251,22 +260,30 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 		//__popc
 			//Count the number of bits that are set to 1 in a 32 bit integer.
 		//top-right Quadrant (Quadrant - I)
-		int cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x >= center.x && curP.y >= center.y));
+		bool pred =is_active && curP.x >= center.x && curP.y >= center.y;
+		int curMask = __ballot_sync(FULL_MASK, pred);
+		int cnt = __popc( curMask );
 		if( cnt > 0 && lane_id == 0 )
 			s_num_pts[0][warp_id] += cnt;
 
 		//top-left Quadrant (Quadrant - II)
-		cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x < center.x && curP.y >= center.y));
+		pred = is_active && curP.x < center.x && curP.y >= center.y;
+		curMask = __ballot_sync(FULL_MASK, pred);
+		cnt = __popc( curMask );
 		if( cnt > 0 && lane_id == 0 )
 			s_num_pts[1][warp_id] += cnt;
 
 		//bottom-left Quadrant (Quadrant - III)
-		cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x < center.x && curP.y < center.y));
+		pred = is_active && curP.x < center.x && curP.y < center.y;
+		curMask = __ballot_sync(FULL_MASK, pred);
+		cnt = __popc( curMask );
 		if( cnt > 0 && lane_id == 0 )
 			s_num_pts[2][warp_id] += cnt;
 
 		//bottom-right Quadrant (Quadrant - IV)
-		cnt = __popc( __ballot_sync(FULL_MASK, is_active && curP.x >= center.x && curP.y < center.y));
+		pred = is_active && curP.x >= center.x && curP.y < center.y;
+		curMask = __ballot_sync(FULL_MASK, pred);
+		cnt = __popc( curMask );
 		if( cnt > 0 && lane_id == 0 )
 			s_num_pts[3][warp_id] += cnt;
 	}		
@@ -277,21 +294,29 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 
 	// Scan the warps' results to know the "global" numbers.
 	// First 4 warps scan the numbers of points per child (inclusive scan).
+	// In the later code we have used warp id to select the quadrant and lane_id to select a warp.
 	if( warp_id < 4 )
 	{
 		int num_pts = lane_id < NUM_WARPS_PER_BLOCK ? s_num_pts[warp_id][lane_id] : 0;
 		#pragma unroll
 		for( int offset = 1 ; offset < NUM_WARPS_PER_BLOCK ; offset *= 2 )
 		{
-			int n = __shfl_up_sync( num_pts, offset, NUM_WARPS_PER_BLOCK );
+
+			//T __shfl_up_sync(unsigned mask, T var, unsigned int delta, int width=warpSize);	
+			int n = __shfl_up_sync(FULL_MASK, num_pts, offset, NUM_WARPS_PER_BLOCK );
+
 			if( lane_id >= offset )
 				num_pts += n;
 		}
 		if( lane_id < NUM_WARPS_PER_BLOCK )
 			s_num_pts[warp_id][lane_id] = num_pts;
 	}
+	//after this we will have the local offsets, i.e , if we have a warp with id X
+	//then s_num_pts[0][x] will store the number of points having warp id <= x 
+	//and belong to the 0th quadrant
 	__syncthreads();
 	// Compute global offsets.
+	//here lane_id will index the warps
 	if( warp_id == 0 )
 	{
 		int sum = s_num_pts[0][NUM_WARPS_PER_BLOCK-1];
@@ -304,7 +329,46 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 		}
 	}
 	__syncthreads();
+	//after this we have the global offsets, i.e, if warp id is X and quadrant q
+	//then s_num_pts[q][x] will store the number of points having warp id <= x 
+	//and belong to the quadrant <= q
+	
+	//make the Scan independent of the quadtree node you are currently in.
+	// for this we just have to add the number of points that come before processing of the current node.
+	if(threadIdx.x < 4*NUM_WARPS_PER_BLOCK){
+		int val = (threadIdx.x == 0)?0:smem[threadIdx.x - 1];
+		smem[threadIdx.x] = val + root->getStartIdx;
+	}
+	__syncthreads();
+	//move points to the next slot
+	Points &output_slot = points[(prmtrs.points_slot+1)%2];
 
+	//Mask for threads in a warp that are less than the current lane_id
+	int lane_mask_lt = (1 << lane_id) - 1; 
+	// Move Points to the appropriate slot 
+	// Quadtree sort implementation
+
+	for( int itr = warp_begin + lane_id ; __any_sync(FULL_MASK, itr < warp_end ) ; itr += warpSize){
+		bool is_active = itr < warp_end;
+
+		float2 curP;
+		if(is_active){
+			curP = in_points.getPoint(itr);
+		}
+		else{
+			curP = make_float2(0.0f, 0.0f);
+		}
+		
+		//counting QUADRANT I points
+		bool pred =is_active && curP.x >= center.x && curP.y >= center.y;
+		int curMask = __ballot_sync(FULL_MASK, pred);
+		int cnt = __popc( curMask & lane_mask_lt );
+		int dest = s_num_pts[0][warp_id] + cnt;
+		if( pred )
+			output_slot.setPoint(dest, curP);
+		
+
+	}
 }
 int main()
 {
