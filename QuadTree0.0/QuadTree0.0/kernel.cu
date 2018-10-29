@@ -178,7 +178,11 @@ class Parameters
 	int points_slot;
 	__host__ __device__ Parameters( int mppn ) : min_points_per_node(mppn), points_slot(0) {}
 	//copy constructor for the evaluation of children of current node
-	__host__ __device__ Parameters( Parameters prm ) : min_points_per_node(prm.min_points_per_node), points_slot((prm.points_slot+1)%2) {}
+	__host__ __device__ Parameters( Parameters prm, bool ) : 
+	min_points_per_node(prm.min_points_per_node), 
+	points_slot((prm.points_slot+1)%2) 
+	{}
+
 
 }
 
@@ -207,11 +211,11 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 		//If in current iteration the points are in slot 1
 		//shift them to slot 0
 		//we want the output in the slot 0
-		if(param.points_slot == 1)
+		if(prmtrs.points_slot == 1)
 		{
 			int it = root->getStartIdx(), end = root->getEndIdx();
 			for( it += threadIdx.x; it < end ; it += NUM_THREADS_PER_BLOCK){
-				if(it < end )
+				if( it < end )
 					points[0].setPoint(it, points[1].getPoint(it));
 			}
 		}
@@ -229,6 +233,8 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 	int warp_begin = root->getStartIdx() + warp_id*NUM_POINTS_PER_WARP;
 	int warp_end = min(warp_begin + NUM_POINTS_PER_WARP, root->getEndIdx());
 
+	
+	//reset counts of warps
 	if( lane_id == 0 )
 	{
 		s_num_pts[0][warp_id] = 0;
@@ -260,7 +266,7 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 		//__popc
 			//Count the number of bits that are set to 1 in a 32 bit integer.
 		//top-right Quadrant (Quadrant - I)
-		bool pred =is_active && curP.x >= center.x && curP.y >= center.y;
+		bool pred = is_active && curP.x >= center.x && curP.y >= center.y;
 		int curMask = __ballot_sync(FULL_MASK, pred);
 		int cnt = __popc( curMask );
 		if( cnt > 0 && lane_id == 0 )
@@ -337,11 +343,11 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 	// for this we just have to add the number of points that come before processing of the current node.
 	if(threadIdx.x < 4*NUM_WARPS_PER_BLOCK){
 		int val = (threadIdx.x == 0)?0:smem[threadIdx.x - 1];
-		smem[threadIdx.x] = val + root->getStartIdx;
+		smem[threadIdx.x] = val + root->getStartIdx();
 	}
 	__syncthreads();
 	//move points to the next slot
-	Points &output_slot = points[(prmtrs.points_slot+1)%2];
+	Points &output = points[(prmtrs.points_slot+1)%2];
 
 	//Mask for threads in a warp that are less than the current lane_id
 	int lane_mask_lt = (1 << lane_id) - 1; 
@@ -365,15 +371,82 @@ void buildQuadtree( Quadtree_Node *root, Points *points, Parameters prmtrs){
 		int cnt = __popc( curMask & lane_mask_lt );
 		int dest = s_num_pts[0][warp_id] + cnt;
 		if( pred )
-			output_slot.setPoint(dest, curP);
+			output.setPoint(dest, curP);
+		if( lane_id == 0 )
+			s_num_pts[0][warp_id] += __popc( pred );
 		
+		//countin QUADRANT II points
+		pred = is_active && curP.x < center.x && curP.y >= center.y;
+		curMask = __ballot_sync(FULL_MASK, pred);
+		cnt = __popc(curMask & lane_mask_lt);
+		dest = s_num_pts[1][warp_id] + cnt;
+		if(pred)
+			output.setPoint(dest, curP);
+		if( lane_id == 0)
+			s_num_pts[1][warp_id] += __popc( pred );
 
+		//countin QUADRANT III points
+		pred = is_active && curP.x < center.x && curP.y < center.y;
+		curMask = __ballot_sync(FULL_MASK, pred);
+		cnt = __popc(curMask & lane_mask_lt);
+		dest = s_num_pts[2][warp_id] + cnt;
+		if(pred)
+			output.setPoint(dest, curP);
+		if( lane_id == 0)
+			s_num_pts[2][warp_id] += __popc( pred );
+
+		//countin QUADRANT IV points
+		pred = is_active && curP.x >= center.x && curP.y < center.y;
+		curMask = __ballot_sync(FULL_MASK, pred);
+		cnt = __popc(curMask & lane_mask_lt);
+		dest = s_num_pts[3][warp_id] + cnt;
+		if(pred)
+			output.setPoint(dest, curP);
+		if( lane_id == 0)
+			s_num_pts[3][warp_id] += __popc( pred );
+
+	}
+	__syncthreads();
+
+	//last thread will launch new block 
+	if( threadIdx.x == NUM_THREADS_PER_BLOCK-1){
+		//create children for next level
+		// set index, bb, startIdx, endIdx and NE, NW, SE, SW children.
+		//Index is used just for sake of future extension if some changes are required then
+		//children nodes
+		Quadtree_Node* NEC = (Quadtree_Node*)malloc(sizeof(Quadtree_Node));
+		Quadtree_Node* NWC = (Quadtree_Node*)malloc(sizeof(Quadtree_Node));
+		Quadtree_Node* SWC = (Quadtree_Node*)malloc(sizeof(Quadtree_Node));
+		Quadtree_Node* SEC = (Quadtree_Node*)malloc(sizeof(Quadtree_Node));
+		//set Bounding Box
+		NEC->setBoundingBox(center.x, center.y, box.getxMax(), box.getyMax());
+		NWC->setBoundingBox(box.getxMin(), center.y, center.x, box.getyMax());
+		SWC->setBoundingBox(box.getxMin(), box.getyMin(), center.x, center.y);
+		SEC->setBoundingBox(center.x, box.getyMin(), box.getxMax(), center.y);
+
+		//set the start and end ranges
+		NEC->setRange(root->getStartIdx(), s_num_pts[0][warp_id]);
+		NWC->setRange(s_num_pts[0][warp_id], s_num_pts[1][warp_id]);
+		SWC->setRange(s_num_pts[1][warp_id], s_num_pts[2][warp_id]);
+		SEC->setRange(s_num_pts[2][warp_id], s_num_pts[3][warp_id]);
+
+		//set the root children 
+		root->setNE(NEC);
+		root->setNW(NWC);
+		root->setSW(SWC);
+		root->setSE(SEC);
+
+		//launch children
+		buildQuadtree<NUM_THREADS_PER_BLOCK><<<1, NUM_THREADS_PER_BLOCK, 4*NUM_WARPS_PER_BLOCK*sizeof(int)>>>(NEC, points, Parameters(prmtrs, true));
+		buildQuadtree<NUM_THREADS_PER_BLOCK><<<1, NUM_THREADS_PER_BLOCK, 4*NUM_WARPS_PER_BLOCK*sizeof(int)>>>(NWC, points, Parameters(prmtrs, true));
+		buildQuadtree<NUM_THREADS_PER_BLOCK><<<1, NUM_THREADS_PER_BLOCK, 4*NUM_WARPS_PER_BLOCK*sizeof(int)>>>(SWC, points, Parameters(prmtrs, true));
+		buildQuadtree<NUM_THREADS_PER_BLOCK><<<1, NUM_THREADS_PER_BLOCK, 4*NUM_WARPS_PER_BLOCK*sizeof(int)>>>(SEC, points, Parameters(prmtrs, true));
 	}
 }
 int main()
 {
 	//parameters
-	const int max_depth = 8;
+	const int max_depth = 10;
 	const int min_points_per_node = 20;
 	int num_points = -1;
 
@@ -447,13 +520,21 @@ int main()
 	//Copy root node from host to device
 	Quadtree_Node h_root;
 	h_root.setRange(0, num_points);
+	h_root.setIdx(0);
 	Quadtree_Node* d_root;
 	checkCudaErrors( cudaMalloc( (void**) &d_root, sizeof(Quadtree_Node)));
 	checkCudaErrors( cudaMemcpy( d_root, &h_root, sizeof(Quadtree_Node), cudaMemcpyHostToDevice));
 
 	//set the recursion limit based on max_depth
 	//maximum possible depth is 24 levels
-  	cudaDeviceSetLimit( cudaLimitDevRuntimeSyncDepth, max_depth );
+	cudaDeviceSetLimit( cudaLimitDevRuntimeSyncDepth, max_depth );
+	Parameters prmtrs( min_points_per_node );
+	const int NUM_THREADS_PER_BLOCK = 512;
+	const int NUM_WARPS_PER_BLOCK = NUM_THREADS_PER_BLOCK / warp_size;
+	const int SHARED_MEM_SIZE = 4*NUM_WARPS_PER_BLOCK*sizeof(int);
+	buildQuadtree<NUM_THREADS_PER_BLOCK><<<1, NUM_THREADS_PER_BLOCK, SHARED_MEM_SIZE>>>(d_root, points, prmtrs);
+
+	checkCudaErrors( cudaGetLastError() );
 
 	getchar();
     return 0;
