@@ -1,0 +1,9 @@
+Running on GPU: 0 (Quadro K620)
+Warp Size: 32
+Threads Per Block: 1024
+File Reading Time: 0.239
+Number of Points: 10000
+cudaFree Time: 28.772
+Data Conversion Time: 4.492
+GPU Data Transfer Time: 4.493
+Kernel Execution Time: 1.069

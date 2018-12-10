@@ -1,0 +1,16 @@
+File Reading Time: 0.016
+Number of Points: 1200
+550.42 120.01
+-166.35 118.22
+-115.82 559.27
+153.96 114.34
+633.86 -53.227
+119.97 104.66
+-303.38 -148.62
+Running on GPU: 0 (Quadro K620)
+Warp Size: 32
+Threads Per Block: 1024
+cudaFree Time: 49.494
+Data Conversion Time: 1.049
+GPU Data Transfer Time: 1.049
+Kernel Execution Time: 0.156
